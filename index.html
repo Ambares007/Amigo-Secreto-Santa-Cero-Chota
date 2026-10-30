@@ -66,9 +66,23 @@ function $(i){return document.getElementById(i)}
 function esc(t){var d=document.createElement('div');d.textContent=t;return d.innerHTML}
 try{picks=JSON.parse(localStorage.getItem(KEY)||'{}');var m=localStorage.getItem(ME);if(m&&NAMES.indexOf(m)>=0)me=m}catch(e){}
 function saveLocal(){try{localStorage.setItem(KEY,JSON.stringify(picks))}catch(e){}}
-function dbSet(n){if(!db)return;var p=picks[n];var r=p?db.doc('picks/p'+NAMES.indexOf(n)).set({giver:n,target:p.target,photo:p.photo||''}):db.doc('picks/p'+NAMES.indexOf(n)).delete();r.catch(function(){})}
+/* ===== FIREBASE: pega aquí la dirección de tu Realtime Database, entre las comillas =====
+   Ejemplo: 'https://mi-proyecto-default-rtdb.firebaseio.com'  (si queda vacío, se guarda solo en cada dispositivo) */
+var FB_URL='https://ambares007-default-rtdb.firebaseio.com';
+FB_URL=FB_URL.replace(/\/+$/,'');var fb=!!FB_URL;
+function pk(n){return 'p'+NAMES.indexOf(n)}
+function fbLoad(){
+  return fetch(FB_URL+'/picks.json').then(function(r){if(!r.ok)throw new Error('http');return r.json()}).then(function(d){
+    var o={};Object.keys(d||{}).forEach(function(k){var v=d[k];if(v&&v.giver&&NAMES.indexOf(v.giver)>=0)o[v.giver]={target:v.target,photo:''}});
+    picks=o;saveLocal();mode='shared';return o})
+}
+function poll(){if(phase==='shuffling'||phase==='choose'||busy)return;fbLoad().then(render).catch(function(){mode='local';render()})}
+function dbSet(n){
+  if(fb){var q=picks[n];return fetch(FB_URL+'/picks/'+pk(n)+'.json',{method:q?'PUT':'DELETE',body:q?JSON.stringify({giver:n,target:q.target}):null}).catch(function(){})}
+  if(!db)return;var p=picks[n];var r=p?db.doc('picks/p'+NAMES.indexOf(n)).set({giver:n,target:p.target,photo:p.photo||''}):db.doc('picks/p'+NAMES.indexOf(n)).delete();r.catch(function(){})}
 function fromDocs(s){var o={};s.docs.forEach(function(d){var v=d.data();if(v&&v.giver)o[v.giver]={target:v.target,photo:v.photo||''}});picks=o;saveLocal()}
-if(window.claude&&claude.use){claude.use('db').then(function(d){
+if(fb){poll();setInterval(poll,4000)}
+else if(window.claude&&claude.use){claude.use('db').then(function(d){
   if(!d)return;db=d;mode='shared';
   d.collection('picks').onSnapshot(function(s){fromDocs(s);if(phase!=='shuffling'&&phase!=='choose')render()},function(){db=null;mode='local';render()});
   // migrate any local picks if db is empty
@@ -100,15 +114,19 @@ function shuffle(){
 }
 function take(el){
   if(busy)return;busy=true;
-  var go=function(){
+  var go=function(retry){
     if(picks[me]){busy=false;phase='idle';render();return}
     var t=choose(me);
     if(!t){busy=false;alert('No quedan opciones válidas. Pide que reinicien el sorteo.');phase='idle';render();return}
-    picks[me]={target:t,photo:''};saveLocal();dbSet(me);
-    if(el){el.className='cd win';el.textContent='🎁'}
-    setTimeout(function(){busy=false;phase='idle';shownRes=true;render()},900)
+    picks[me]={target:t,photo:''};saveLocal();
+    var fin=function(){if(el){el.className='cd win';el.textContent='🎁'}setTimeout(function(){busy=false;phase='idle';shownRes=true;render()},900)};
+    if(!fb){dbSet(me);fin();return}
+    dbSet(me).then(fbLoad).then(function(){
+      var clash=NAMES.some(function(g){return g!==me&&picks[g]&&picks[g].target===t&&NAMES.indexOf(g)<NAMES.indexOf(me)});
+      if(clash&&!retry){delete picks[me];dbSet(me).then(fbLoad).then(function(){go(true)},function(){go(true)})}else fin()
+    }).catch(function(){fin()})
   };
-  if(db)db.collection('picks').get().then(function(s){fromDocs(s);go()}).catch(go);else go()
+  if(fb)fbLoad().then(function(){go()},function(){go()});else if(db)db.collection('picks').get().then(function(s){fromDocs(s);go()}).catch(go);else go()
 }
 function photo(ev){
   var f=ev.target.files[0];if(!f||!me)return;var r=new FileReader();
@@ -119,7 +137,7 @@ function photo(ev){
   r.readAsDataURL(f)}
 function resetAll(){
   if(!confirm('¿Reiniciar todo el sorteo? Se borrarán todos los resultados.'))return;
-  NAMES.forEach(function(n){if(picks[n]){delete picks[n];dbSet(n)}});picks={};saveLocal();phase='idle';shownRes=false;render()}
+  if(fb)fetch(FB_URL+'/picks.json',{method:'DELETE'}).catch(function(){});NAMES.forEach(function(n){if(picks[n]){delete picks[n];if(!fb)dbSet(n)}});picks={};saveLocal();phase='idle';shownRes=false;render()}
 
 function render(){
   var h='',done=Object.keys(picks).length;
